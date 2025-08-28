@@ -36,7 +36,7 @@ def main():
                         win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, block_msg)
                         win32clipboard.CloseClipboard()
 
-                        # 👉 컨벤션 로그 (B = Clipboard)
+                        # 젠시스 로그
                         print(f"[B] \"Clipboard Detect Alert\" {ts} DK='{data[:15]}...' / action=blocked")
 
                     else:

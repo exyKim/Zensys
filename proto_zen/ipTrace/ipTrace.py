@@ -5,11 +5,10 @@ import ipaddress
 from datetime import datetime
 
 # -------------------------------
-# Config 로더: JSON5(주석 허용) → JSON(주석 제거) 순서로 시도
+# Config 로더
 # -------------------------------
 def _strip_line_comments(text: str) -> str:
     import re
-    # 아주 단순한 // 주석 제거 (문자열 내부 // 케이스는 운영에서 JSON5 사용 권장)
     return re.sub(r"//.*", "", text)
 
 def load_config(path="ip_so.json") -> dict:
@@ -72,11 +71,11 @@ def ip_in_watchlist(ip: str, nets) -> bool:
     return any(ip_obj in net for net in nets)
 
 def convention_line_ip_detect(remote_ip: str, pid: int, proc_name: str) -> str:
-    # PDF 컨벤션: [I] "IP Detect Alert" YYYY-MM-DD HH:MM:SS DK='IP' / pid=... proc='...'
+    # 젠시스 로그
     return f"[I] \"IP Detect Alert\" {now_local()} DK='{remote_ip}' / pid={pid} proc='{proc_name}'"
 
 # -------------------------------
-# 메인 모니터
+# 메인 모니터링 로그
 # -------------------------------
 def monitor_ip_connections(cfg_path="ip_so.json"):
     cfg = load_config(cfg_path)
