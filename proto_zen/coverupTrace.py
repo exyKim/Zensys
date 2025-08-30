@@ -21,10 +21,10 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent, FileCreatedEvent, FileDeletedEvent, FileMovedEvent, FileModifiedEvent
 
 # ------------- 설정값 -------------
-WATCH_PATHS = [p.strip() for p in os.environ.get("COVERUP_WATCH_PATHS", r"C:\sensitiveFile").split(";") if p.strip()]
+WATCH_PATHS = [p.strip() for p in os.environ.get("COVERUP_WATCH_PATHS", r"C:\sensitiveFile").split(";") if p.strip()]       # 감시할 폴더 목록(c:\sensitiveFile파일)
 QUARANTINE_DIR = Path(os.environ.get("COVERUP_QUARANTINE_DIR", "./quarantine")).resolve()
 DB_URL = os.environ.get("COVERUP_DB_URL", "sqlite:///./coverup.db")
-POLL_SEC = float(os.environ.get("COVERUP_POLL_SEC", "2.0"))
+POLL_SEC = float(os.environ.get("COVERUP_POLL_SEC", "2.0"))         # 감시 폴링 간격(2초)
 DEFAULT_USER = os.environ.get("ZEN_USER", None)
 
 # 메일(선택): SMTP_* 환경변수 설정 시 승인요청 메일 전송
@@ -44,19 +44,19 @@ Base = declarative_base()
 class CoverPolicy(Base):
     __tablename__ = "cover_policies"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    file_type = Column(String, index=True)                 # 예: ".log" ".csv" ".pf"
-    security_setting = Column(String)                      # 예: "strict" | "audit"
-    register_reason = Column(String, nullable=True)
-    detection_event_types = Column(String)                 # CSV: "delete,move,copy,modify"
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    file_type = Column(String, index=True)                 # 적용 파일 확장자 예: ".log" ".csv" ".pf"
+    security_setting = Column(String)                      # 정책 강도 예: "strict" | "audit"
+    register_reason = Column(String, nullable=True)        # 정책 등록 사유
+    detection_event_types = Column(String)                 # 감지 이벤트 타입 CSV: "delete,move,copy,modify"
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))       # 정책 생성 시각
 
 
 class CoverEvent(Base):
     __tablename__ = "cover_events"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    path = Column(Text)
-    file_name = Column(String)
-    ext = Column(String, index=True)
+    path = Column(Text)                                    # 파일 경로   
+    file_name = Column(String)                             # 파일 이름
+    ext = Column(String, index=True)                       # 파일 확장자
     event_type = Column(String)                            # delete | move | copy | modify
     actor = Column(String)                                 # 사용자ID(대략 os.getlogin)
     hash_before = Column(String, nullable=True)
@@ -71,7 +71,7 @@ class CoverEvent(Base):
     policy = relationship("CoverPolicy")
 
 
-class BlockedUser(Base):
+class BlockedUser(Base):            # 차단된 사용자 목록
     __tablename__ = "blocked_users"
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String, unique=True, index=True)
@@ -136,7 +136,7 @@ def sha256_of(path: Path) -> Optional[str]:
     except Exception:
         return None
 
-def emit_detection_log(signature: str, alert_text: str, dk_value: str, user: Optional[str] = None):
+def emit_detection_log(signature: str, alert_text: str, dk_value: str, user: Optional[str] = None):                     
     """
     로그 포맷(컨벤션): <Sig> "<Text>" YYYY-MM-DD DK '<value>' / user '<name>'
     Sig: D/T/U/C/I/B  (여긴 C = Cover-up)
