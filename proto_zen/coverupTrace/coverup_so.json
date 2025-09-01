@@ -1,9 +1,14 @@
 {
-  "files": [
-    "C:\\sensitiveFile\\audit.log",
-    "C:\\sensitiveFile\\system.evtx",
-    "C:\\sensitiveFile\\export.csv"
+  "watch_dirs": [
+    "~",                                   
+    "C:\\\\Users\\\\*\\\\Desktop",         
+    "C:\\\\Users\\\\*\\\\Documents",       
+    "C:\\\\Users\\\\*\\\\Downloads"
   ],
 
-  "scan_interval_sec": 2
+  "include_names": ["audit.*", "export.*"],
+  "include_exts": ["log", "evtx", "csv"],
+  "exclude_dirs": ["C:\\\\Windows", "C:\\\\Program Files", "/System"],
+  "scan_interval_sec": 2,
+  "max_files": 15000
 }
