@@ -1,9 +1,0 @@
-{
-  "files": [
-    "C:\\sensitiveFile\\audit.log",
-    "C:\\sensitiveFile\\system.evtx",
-    "C:\\sensitiveFile\\export.csv"
-  ],
-
-  "scan_interval_sec": 2
-}
