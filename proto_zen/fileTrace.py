@@ -5,14 +5,9 @@ from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-WATCH_DIR = r"C:\sensitiveFile"
-SENSITIVE_KEYWORD = "ask2025"
-
-total_sensitive_accesses = 0
-successful_detections = 0
 
 def calculate_file_hash(file_path):
-    """SHA-256 Hash"""
+    """SHA-256 Hash (4KB 청크)"""
     sha256_hash = hashlib.sha256()
     try:
         with open(file_path, "rb") as f:
@@ -22,69 +17,86 @@ def calculate_file_hash(file_path):
     except Exception:
         return "N/A"
 
+
 class SensitiveAccessHandler(FileSystemEventHandler):
+    def __init__(self, mode, rules):
+        super().__init__()
+        self.mode = mode      # "ext" 또는 "kw"
+        self.rules = rules    # 확장자 리스트 또는 키워드 리스트
+
+    def is_sensitive(self, file_path):
+        filename = os.path.basename(file_path).lower()
+        ext = os.path.splitext(file_path)[1].lower()
+
+        if self.mode == "ext":   # 확장자 기반
+            return ext in self.rules
+        elif self.mode == "kw":  # 키워드 기반
+            return any(keyword in filename for keyword in self.rules)
+        return False
+
+    def log_event(self, action, file_path):
+        try:
+            user_name = os.getlogin()
+        except OSError:
+            user_name = "Unknown"
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        file_name = os.path.basename(file_path)
+        file_hash = calculate_file_hash(file_path) if os.path.exists(file_path) else "N/A"
+
+        print(
+            f"[D] \"Document Detect Alert - {action}\" {timestamp} "
+            f"/ User={user_name}, File={file_name}, Hash={file_hash}, Action={action}"
+        )
+
+    def on_created(self, event):
+        if not event.is_directory and self.is_sensitive(event.src_path):
+            self.log_event("CREATED", event.src_path)
+
     def on_modified(self, event):
-        global total_sensitive_accesses, successful_detections
-
-        if not event.is_directory and SENSITIVE_KEYWORD in os.path.basename(event.src_path):
-            total_sensitive_accesses += 1
-            start_time = time.time()
-
-            try:
-                user_name = os.getlogin()
-            except OSError:
-                user_name = "Unknown"
-
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            file_name = os.path.basename(event.src_path)
-            file_hash = calculate_file_hash(event.src_path)
-            detection_time = round(time.time() - start_time, 2)
-
-            successful_detections += 1
-            detection_rate = round((successful_detections / total_sensitive_accesses) * 100, 2)
-
-            print("\n[ALERT] Sensitive Document Access Detected")
-            print(f"- User Name: {user_name}")
-            print(f"- File Name: {file_name}")
-            print(f"- Timestamp: {timestamp}")
-            print(f"- File Hash (SHA-256): {file_hash}")
-            print(f"- Detection Time: {detection_time} seconds")
-            print(f"- Current Detection Rate: {detection_rate}%")
+        if not event.is_directory and self.is_sensitive(event.src_path):
+            self.log_event("MODIFIED", event.src_path)
 
     def on_deleted(self, event):
-        global total_sensitive_accesses, successful_detections
+        if not event.is_directory and self.is_sensitive(event.src_path):
+            self.log_event("DELETED", event.src_path)
 
-        if not event.is_directory and SENSITIVE_KEYWORD in os.path.basename(event.src_path):
-            total_sensitive_accesses += 1
-            start_time = time.time()
+    def on_moved(self, event):
+        if not event.is_directory and self.is_sensitive(event.dest_path):
+            self.log_event("MOVED/RENAMED", event.dest_path)
 
-            try:
-                user_name = os.getlogin()
-            except OSError:
-                user_name = "Unknown"
-
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            file_name = os.path.basename(event.src_path)
-            detection_time = round(time.time() - start_time, 2)
-
-            successful_detections += 1
-            detection_rate = round((successful_detections / total_sensitive_accesses) * 100, 2)
-
-            print("\n[ALERT] Sensitive Document Deletion Detected")
-            print(f"- User Name: {user_name}")
-            print(f"- File Name: {file_name}")
-            print(f"- Timestamp: {timestamp}")
-            print(f"- Detection Time: {detection_time} seconds")
-            print(f"- Current Detection Rate: {detection_rate}%")
 
 if __name__ == "__main__":
-    os.makedirs(WATCH_DIR, exist_ok=True)  # 폴더가 없으면 자동 생성
-    event_handler = SensitiveAccessHandler()
+    # 감시 폴더
+    WATCH_DIR = input("감시할 폴더 경로를 입력하세요 (예: C:\\sensitiveFile): ").strip()
+    if not WATCH_DIR:
+        WATCH_DIR = r"C:\sensitiveFile"
+    os.makedirs(WATCH_DIR, exist_ok=True)
+
+    # 모드 선택
+    mode_input = input("기밀문서 설정 방식을 선택하세요 (확장자 / 파일이름): ").strip()
+    if mode_input == "확장자":
+        rules_input = input("민감한 확장자들을 입력하세요 (예: .docx,.pdf,.hwp): ").strip()
+        rules = [e.strip().lower() if e.strip().startswith(".") else "." + e.strip().lower()
+                 for e in rules_input.split(",") if e.strip()]
+        mode = "ext"
+    elif mode_input == "파일이름":
+        rules_input = input("민감한 파일 키워드를 입력하세요 (예: secret,plan,기밀): ").strip()
+        rules = [k.strip().lower() for k in rules_input.split(",") if k.strip()]
+        mode = "kw"
+    else:
+        print("[ERROR] 잘못된 입력입니다. '확장자' 또는 '파일이름' 중 하나를 입력하세요.")
+        exit(1)
+
+    # 이벤트 핸들러 및 감시 시작
+    event_handler = SensitiveAccessHandler(mode, rules)
     observer = Observer()
     observer.schedule(event_handler, path=WATCH_DIR, recursive=False)
 
-    print(f"[*] Monitoring folder: {WATCH_DIR}")
-    print("[*] Waiting for access to sensitive documents...\n")
+    print("\n[*] Monitoring folder:", WATCH_DIR)
+    print("[*] Mode:", "확장자 기반" if mode == "ext" else "파일이름 기반")
+    print("[*] Rules:", rules)
+    print("[*] Waiting for file activity...\n")
 
     observer.start()
     try:
