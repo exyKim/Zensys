@@ -1,18 +1,5 @@
 {
   "watch_dirs": [
-<<<<<<< HEAD
-    "~",                                   
-    "C:\\\\Users\\\\*\\\\Desktop",         
-    "C:\\\\Users\\\\*\\\\Documents",       
-    "C:\\\\Users\\\\*\\\\Downloads"
-  ],
-
-  "include_names": ["audit.*", "export.*"],
-  "include_exts": ["log", "evtx", "csv"],
-  "exclude_dirs": ["C:\\\\Windows", "C:\\\\Program Files", "/System"],
-  "scan_interval_sec": 2,
-  "max_files": 15000
-=======
     "C:\\\\Users\\\\*\\\\Desktop",
     "C:\\\\Users\\\\*\\\\Documents",
     "C:\\\\Users\\\\*\\\\Downloads"
@@ -29,5 +16,4 @@
   "max_files": 15000,
   "quiet_baseline": true,
   "quiet_header": true
->>>>>>> fix/usb-lite
 }
