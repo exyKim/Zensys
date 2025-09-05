@@ -3,7 +3,7 @@
   "log_file": "usbTrace.log",
   "approved": {
     "uids": [],
-    "serials": ["85E10C13"],
+    "serials": [],
     "vendors": [],
     "products": []
   }
