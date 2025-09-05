@@ -7,8 +7,8 @@ from datetime import datetime
 
 IS_WINDOWS = platform.system().lower().startswith("win")
 if IS_WINDOWS:
-    import pythoncom  # pip install pywin32
-    import wmi        # pip install wmi
+    import pythoncom  
+    import wmi        
 
 # -----------------------
 # JSON 로더 (json5 주석 허용)
