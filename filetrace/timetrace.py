@@ -1,124 +1,188 @@
 import os
 import time
 import hashlib
+import platform
+from pathlib import Path
 from datetime import datetime
+from typing import Dict, Optional
+
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-# 감시할 경로를 사용자로부터 입력받습니다.
-user_input_path = input("감시할 폴더 또는 파일 경로를 입력하세요: ")
+# ----------------------------- 유틸 -----------------------------
+def iso_now() -> str:
+    """타임존 포함 ISO 포맷(초 단위)."""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
 
-# 입력된 경로가 파일인지 폴더인지 확인하고 WATCH_DIR 변수를 설정합니다.
-if os.path.isfile(user_input_path):
-    # 만약 파일 경로라면, 파일이 속한 폴더를 감시 대상으로 설정합니다.
-    WATCH_DIR = os.path.dirname(user_input_path)
-    print(f"파일 경로를 입력하셨습니다. 해당 파일이 있는 폴더 '{WATCH_DIR}'를 감시합니다.")
-elif os.path.isdir(user_input_path):
-    # 만약 폴더 경로라면, 그대로 감시 대상으로 설정합니다.
-    WATCH_DIR = user_input_path
-else:
-    # 존재하지 않는 경로라면, 폴더를 새로 생성하기 위해 그대로 설정합니다.
-    WATCH_DIR = user_input_path
-    print(f"'{WATCH_DIR}' 폴더가 존재하지 않아 새로 생성합니다.")
-    
-# ------------------------------
-# 실행 시 사용자 입력 받기 (근무시간)
-# ------------------------------
-try:
-    # 문자열로 '시:분'을 입력받습니다 (예: 9:30, 18:00)
-    WORK_START_STR = input("근무 시작 시간 (HH:MM): ")
-    WORK_END_STR = input("근무 종료 시간 (HH:MM): ")
+### 수정: 사람이 읽기 좋은 시간 포맷 추가
+def pretty_now() -> str:
+    """YYYY-MM-DD HH:MM:SS (TZ) 형식 로컬 시간."""
+    now = datetime.now().astimezone()
+    tz = now.tzname() or ""
+    return f"{now.strftime('%Y-%m-%d %H:%M:%S')} ({tz})"
 
-    # 문자열을 파싱하여 시간과 분을 분리합니다.
-    start_hour, start_minute = map(int, WORK_START_STR.split(':'))
-    end_hour, end_minute = map(int, WORK_END_STR.split(':'))
-
-    # 시작 시간과 종료 시간을 모두 '분' 단위로 변환합니다.
-    WORK_START_MIN = start_hour * 60 + start_minute
-    WORK_END_MIN = end_hour * 60 + end_minute
-
-    # 범위 및 논리 검증
-    if not (0 <= start_hour <= 23 and 0 <= start_minute <= 59 and \
-            0 <= end_hour <= 23 and 0 <= end_minute <= 59):
-        print("[ERROR] 근무 시간은 'HH:MM' 형식으로 입력해야 하며, 유효한 시간 범위(00:00~23:59)여야 합니다. 프로그램을 종료합니다.")
-        exit(1)
-
-    if WORK_START_MIN >= WORK_END_MIN:
-        print("[ERROR] 근무 시작 시간은 종료 시간보다 빨라야 합니다. 프로그램을 종료합니다.")
-        exit(1)
-
-except ValueError:
-    print("[ERROR] 'HH:MM' 형식에 맞게 숫자로 입력해야 합니다. 프로그램을 종료합니다.")
-    exit(1)
-
-# ------------------------------
-# 파일 해시 계산 함수
-# ------------------------------
-def calculate_file_hash(file_path):
-    """SHA-256 Hash"""
-    sha256_hash = hashlib.sha256()
+def current_identity() -> Dict[str, str]:
+    """사용자/도메인/호스트/PID 최소 식별 정보."""
     try:
-        with open(file_path, "rb") as f:
-            for byte_block in iter(lambda: f.read(4096), b""):
-                sha256_hash.update(byte_block)
-        return sha256_hash.hexdigest()
+        user = os.getlogin()
+    except Exception:
+        user = os.environ.get("USERNAME") or os.environ.get("USER") or "unknown"
+    domain = os.environ.get("USERDOMAIN") or os.environ.get("DOMAIN") or ""
+    host = platform.node() or os.environ.get("COMPUTERNAME") or os.environ.get("HOSTNAME") or "unknown-host"
+    pid = str(os.getpid())
+    return {"user": user, "domain": domain, "host": host, "pid": pid}
+
+def calculate_file_hash(p: Path) -> str:
+    """SHA-256 해시 계산(실패 시 'N/A')."""
+    try:
+        h = hashlib.sha256()
+        with p.open("rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                h.update(chunk)
+        return h.hexdigest()
     except Exception:
         return "N/A"
 
-# ------------------------------
-# 근무 시간 외인지 확인하는 함수 (수정)
-# ------------------------------
-def is_outside_working_hours():
-    """현재 시간이 근무시간 외인지 확인"""
-    # 현재 시간을 '분' 단위로 변환합니다.
-    current_time_in_minutes = datetime.now().hour * 60 + datetime.now().minute
-    
-    # 변환된 값으로 근무 시간 외인지 확인합니다.
-    return not (WORK_START_MIN <= current_time_in_minutes < WORK_END_MIN)
+def normalize_dir_input(raw: str) -> Path:
+    """입력 경로 정규화(따옴표/공백 제거, ~, %VAR% 확장, 절대경로화)."""
+    s = raw.strip().strip('"').strip("'")
+    s = os.path.expandvars(os.path.expanduser(s))
+    return Path(s).resolve()
 
-# ------------------------------
-# 이벤트 핸들러
-# ------------------------------
+# ----------------------------- 근무시간 -----------------------------
+def parse_work_time(hhmm: str) -> Optional[int]:
+    """'HH:MM' → 분(min) 단위. 형식/범위 오류 시 None."""
+    try:
+        hh, mm = map(int, hhmm.split(":"))
+        if 0 <= hh <= 23 and 0 <= mm <= 59:
+            return hh * 60 + mm
+    except Exception:
+        pass
+    return None
+
+### 수정: wrap-around(자정 넘김) 지원
+def is_outside_working_hours(start_min: int, end_min: int) -> bool:
+    """
+    현재 시간이 근무시간 외인지 (wrap-around 지원).
+    - 일반: start < end (예: 09:00~18:00)
+    - 자정 넘김: start > end (예: 22:00~06:00)
+    - start == end: 24시간 근무로 간주
+    """
+    cur = datetime.now().hour * 60 + datetime.now().minute
+    if start_min == end_min:
+        return False  # 24시간 근무
+    if start_min < end_min:
+        return not (start_min <= cur < end_min)
+    else:
+        in_work = (cur >= start_min) or (cur < end_min)
+        return not in_work
+
+# ----------------------------- 로그 포맷터 -----------------------------
+def print_event_block(signature: str, event_desc: str, action: str, file_path: Path, work_range: str):
+    ident = current_identity()
+    ts = iso_now()
+    ts_pretty = pretty_now()   ### 수정: 사람이 읽기 쉬운 시간 추가
+    name = file_path.name
+    fhash = calculate_file_hash(file_path) if file_path.exists() else "N/A"
+
+    # 요약 + 사람이 읽기 쉬운 로그
+    print("\n" + "=" * 60)
+    print(f"{signature}/ {action} {ts} DK='ALL' / user '{ident['user']}' / host '{ident['host']}'")
+    print(f"LocalTime : {ts_pretty}")   ### 수정: 로그에 현지 시각 출력
+    dom_user = (ident['domain'] + '\\\\') if ident['domain'] else ''
+    dom_user += ident['user']
+    print(f"[{signature}] {event_desc}")
+    print(f"    Action    : {action}")
+    print(f"    File      : {name}")
+    print(f"    Path      : {str(file_path)}")
+    print(f"    Hash      : {fhash}")
+    print(f"    User      : {dom_user}")
+    print(f"    Host      : {ident['host']}")
+    print(f"    PID       : {ident['pid']}")
+    print(f"    WorkTime  : {work_range}")
+
+    # JSON 구조 로그
+    print("\n[JSON]")
+    j = {
+        "ts": ts,
+        "ts_local": ts_pretty,   
+        "action": action,
+        "file": str(file_path),
+        "file_name": name,
+        "hash": fhash,
+        "dk": "ALL",
+        "user": ident["user"],
+        "domain": ident["domain"],
+        "host": ident["host"],
+        "pid": ident["pid"],
+        "work_time": work_range,
+        "reason": "outside_working_hours"
+    }
+    import json
+    print(json.dumps(j, ensure_ascii=False, indent=2))
+    print("=" * 60 + "\n")
+
+
 class SensitiveAccessHandler(FileSystemEventHandler):
-    def log_event(self, signature, event_desc, action, file_path):
-        try:
-            user_name = os.getlogin()
-        except OSError:
-            user_name = "Unknown"
+    """
+    근무시간 외에 발생한 파일 '수정/삭제' 이벤트만 기록.
+    """
+    def __init__(self, work_start_min: int, work_end_min: int, work_range_label: str):
+        super().__init__()
+        self.work_start_min = work_start_min
+        self.work_end_min = work_end_min
+        self.work_range_label = work_range_label
 
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        file_name = os.path.basename(file_path) if os.path.exists(file_path) else os.path.basename(file_path)
-        file_hash = calculate_file_hash(file_path) if os.path.exists(file_path) else "N/A"
-
-        # 로그 포맷
-        log_message = (
-            f"[{signature}] \"{event_desc}\" {timestamp} DK='ALL' "
-            f"/ User={user_name}, File={file_name}, Hash={file_hash}, Action={action}"
-        )
-        print(log_message)
+    def _should_log(self) -> bool:
+        return is_outside_working_hours(self.work_start_min, self.work_end_min)
 
     def on_modified(self, event):
-        if is_outside_working_hours() and not event.is_directory:
-            self.log_event("T", "문서 수정 탐지", "MODIFIED", event.src_path)
+        if not event.is_directory and self._should_log():
+            print_event_block("T", "문서 수정 탐지", "MODIFIED", Path(event.src_path), self.work_range_label)
 
     def on_deleted(self, event):
-        if is_outside_working_hours() and not event.is_directory:
-            self.log_event("T", "문서 삭제 탐지", "DELETED", event.src_path)
+        if not event.is_directory and self._should_log():
+            print_event_block("T", "문서 삭제 탐지", "DELETED", Path(event.src_path), self.work_range_label)
 
-
-# ------------------------------
-# 메인 실행
-# ------------------------------
+# ----------------------------- 메인 -----------------------------
 if __name__ == "__main__":
-    os.makedirs(WATCH_DIR, exist_ok=True)
-    event_handler = SensitiveAccessHandler()
-    observer = Observer()
-    observer.schedule(event_handler, path=WATCH_DIR, recursive=False)
+    # 1) 경로 입력 & 정규화
+    raw_path = input("감시할 폴더 또는 파일 경로를 입력하세요: ").strip()
+    if not raw_path:
+        raw_path = r"C:\sensitiveFile"
+    p = normalize_dir_input(raw_path)
 
-    print(f"[*] Monitoring folder: {WATCH_DIR}")
-    print(f"[*] Working hours: {WORK_START_STR} ~ {WORK_END_STR}")
-    print("[*] Detect Target: ALL FILES")
-    print("[*] Waiting for suspicious activity outside working hours...\n")
+    # 파일을 주면 폴더로 전환
+    if p.is_file():
+        watch_dir = p.parent
+        print(f"파일 경로를 입력하셨습니다. 해당 파일이 있는 폴더 '{watch_dir}'를 감시합니다.")
+    else:
+        watch_dir = p
+        if not watch_dir.exists():
+            print(f"'{watch_dir}' 폴더가 존재하지 않아 새로 생성합니다.")
+            watch_dir.mkdir(parents=True, exist_ok=True)
+
+    # 2) 근무시간 입력 & 검증 (wrap-around 허용)
+    work_start_str = input("근무 시작 시간 (HH:MM): ").strip()
+    work_end_str   = input("근무 종료 시간 (HH:MM): ").strip()
+    ws = parse_work_time(work_start_str)
+    we = parse_work_time(work_end_str)
+    if ws is None or we is None:
+        print("[ERROR] 근무 시간은 'HH:MM' 형식으로 00:00~23:59 범위여야 합니다.")
+        raise SystemExit(1)
+    if ws == we:
+        print("[WARN] 시작/종료가 동일합니다 (24시간 근무). 근무시간 외 트리거는 발생하지 않습니다.")
+    work_range_label = f"{work_start_str}~{work_end_str}"
+
+    # 3) 감시 시작
+    handler = SensitiveAccessHandler(ws, we, work_range_label)
+    observer = Observer()
+    observer.schedule(handler, path=str(watch_dir), recursive=False)
+
+    print(f"\n[*] Monitoring folder: {watch_dir}")
+    print(f"[*] Working hours   : {work_range_label} (wrap-around 지원)")
+    print("[*] Detect Target   : ALL FILES")
+    print("[*] Trigger         : Outside working hours (MODIFIED / DELETED)\n")
 
     observer.start()
     try:
