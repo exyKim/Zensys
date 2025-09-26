@@ -1,128 +1,253 @@
 import os
 import time
 import hashlib
+import getpass
+import json
+import platform
+from pathlib import Path
 from datetime import datetime
+from typing import Dict, Set, Optional  # Optional은 남겨둬도 무방
+
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+# ----------------------------- 유틸 -----------------------------
+def iso_now() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
 
-def calculateFileHash(filePath):
+def current_identity() -> Dict[str, str]:
     """
-    파일의 SHA-256 해시를 계산합니다.
+    사용자/도메인/호스트/PID 최소 식별정보.
+    외부 라이브러리 없이 동작, 실패 시 'unknown' 처리.
     """
-    sha256Hash = hashlib.sha256()
     try:
-        with open(filePath, "rb") as file:
-            for byteBlock in iter(lambda: file.read(4096), b""):
-                sha256Hash.update(byteBlock)
-        return sha256Hash.hexdigest()
+        user = getpass.getuser() or os.environ.get("USERNAME") or os.environ.get("USER") or "unknown"
+    except Exception:
+        user = os.environ.get("USERNAME") or os.environ.get("USER") or "unknown"
+    domain = os.environ.get("USERDOMAIN") or os.environ.get("DOMAIN") or ""
+    host = platform.node() or os.environ.get("COMPUTERNAME") or os.environ.get("HOSTNAME") or "unknown-host"
+    pid = str(os.getpid())
+    return {"user": user, "domain": domain, "host": host, "pid": pid}
+
+def calculate_file_hash(file_path: Path) -> str:
+    try:
+        sha256_hash = hashlib.sha256()
+        with file_path.open("rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(chunk)
+        return sha256_hash.hexdigest()
     except Exception:
         return "N/A"
 
+# ----------------------------- 노이즈 필터 -----------------------------
+NOISY_SUFFIX = ('.tmp', '.crdownload')
+def is_noisy(p: Path) -> bool:
+    n = p.name.lower()
+    return n.startswith('~$') or n.endswith(NOISY_SUFFIX)
 
+# ----------------------------- 리포지토리 (DB 자리) -----------------------------
+class EventRepository:
+    def insert_event(self, event_data: Dict) -> Dict:
+        raise NotImplementedError
+    def load_rules(self, mode: str) -> Optional[Set[str]]:
+        return None
+
+class InMemoryEventRepository(EventRepository):
+    def __init__(self):
+        self._auto_id = 0
+        self._rows = []
+    def insert_event(self, event_data: Dict) -> Dict:
+        self._auto_id += 1
+        stored = {"event_id": self._auto_id, "stored_at": iso_now()}
+        row = {**event_data, **stored}
+        self._rows.append(row)
+        return stored
+    def load_rules(self, mode: str) -> Optional[Set[str]]:
+        return None
+
+# ----------------------------- 파이프라인 -----------------------------
+class SecurityPipeline:
+    """
+    감지 이벤트 처리:
+    1) 저장 리포지토리 호출(현재는 메모리) → event_id/시간 확보
+    2) 로그 출력(요약/사람용/JSON)
+    """
+    def __init__(self, detection_mode: str, detection_rules: Set[str], repo: EventRepository):
+        self.detection_mode = detection_mode  # "ext" | "kw"
+        self.detection_rules = detection_rules
+        self.repo = repo
+
+    def handle_event(self, event_data: Dict):
+        db_result = self.repo.insert_event(event_data)
+        event_id = db_result.get("event_id")
+        stored_at = db_result.get("stored_at")
+
+        print("\n" + "=" * 60)
+        print(
+            f"D/ {event_data['action']} {event_data['timestamp']} "
+            f"DK='{event_data['detected_item']}' / user '{event_data.get('user','unknown')}' "
+            f"/ host '{event_data.get('host','unknown-host')}' / id {event_id}"
+        )
+
+        dom = event_data.get('domain') or ''
+        dom_user = (dom + '\\\\') if dom else ''
+        dom_user += event_data.get('user', 'unknown')
+
+        print(f"[D] Action    : {event_data['action']}")
+        print(f"    File      : {event_data['file_name']}")
+        print(f"    Path      : {event_data['file_path']}")
+        print(f"    Hash      : {event_data['file_hash']}")
+        print(f"    User      : {dom_user}")
+        print(f"    Host      : {event_data.get('host','unknown-host')}")
+        print(f"    PID       : {event_data.get('pid','-')}")
+        print(f"    StoredAt  : {stored_at}")
+        print(f"    EventID   : {event_id}")
+
+        print("\n[JSON]")
+        j = {
+            "ts": event_data["timestamp"],
+            "action": event_data["action"],
+            "file": event_data["file_path"],
+            "file_name": event_data["file_name"],
+            "hash": event_data["file_hash"],
+            "detected_item": event_data["detected_item"],
+            "user": event_data.get("user"),
+            "domain": event_data.get("domain"),
+            "host": event_data.get("host"),
+            "pid": event_data.get("pid"),
+            "db_event_id": event_id,
+            "db_stored_at": stored_at,
+        }
+        print(json.dumps(j, ensure_ascii=False, indent=2))
+        print("=" * 60 + "\n")
+
+# ----------------------------- 핸들러 -----------------------------
 class SensitiveAccessHandler(FileSystemEventHandler):
-    """
-    민감한 파일에 대한 파일 시스템 이벤트를 처리하는 클래스
-    """
-    def __init__(self, mode, rules):
+    def __init__(self, pipeline: SecurityPipeline, debounce_sec: float = 1.5):
         super().__init__()
-        self.detectionMode = mode
-        self.detectionRules = rules
+        self.pipeline = pipeline
+        self._gap = debounce_sec
+        self._last_emit: Dict[str, float] = {}   # 파일별 최근 이벤트 시각
 
-    def isSensitive(self, filePath):
-        """
-        파일이 설정된 규칙에 따라 민감한지 확인
-        """
-        fileName = os.path.basename(filePath).lower()
-        fileExtension = os.path.splitext(filePath)[1].lower()
-
-        if self.detectionMode == "ext":
-            # 확장자 기반 검사
-            return fileExtension in self.detectionRules
-        elif self.detectionMode == "kw":
-            # 키워드 기반 검사
-            return any(keyword in fileName for keyword in self.detectionRules)
+    # 디바운스
+    def _debounced(self, p: Path, action: str) -> bool:
+        now = time.time()
+        k = f"{str(p)}|{action}"
+        last = self._last_emit.get(k, 0.0)
+        if now - last < self._gap:
+            return True
+        self._last_emit[k] = now
         return False
 
-    def logEvent(self, action, filePath, detectedKeyword=""):
-        """
-        파일 접근 이벤트를 요청된 형식의 로그로 기록
-        """
-        try:
-            userName = os.getlogin()
-        except OSError:
-            userName = "Unknown"
+    def is_sensitive(self, file_path: Path) -> bool:
+        file_name = file_path.name.lower()
+        ext = file_path.suffix.lower()
+        if self.pipeline.detection_mode == "ext":
+            return ext in self.pipeline.detection_rules
+        elif self.pipeline.detection_mode == "kw":
+            return any(kw in file_name for kw in self.pipeline.detection_rules)
+        return False
 
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        fileName = os.path.basename(filePath)
-        fileHash = calculateFileHash(filePath) if os.path.exists(filePath) else "N/A"
-
-        print(
-            f"D/ {action} {timestamp} "
-            f"DK='{detectedKeyword}' / user '{userName}'"
+    def generate_event_data(self, action: str, file_path: Path) -> Dict:
+        file_hash = calculate_file_hash(file_path) if file_path.exists() else "N/A"
+        detected_item = (
+            file_path.suffix.lower()
+            if self.pipeline.detection_mode == "ext"
+            else file_path.name.lower()
         )
-        print(f"[D] Document Detect Alert - {action}")
-        print(f"Timestamp: {timestamp}")
-        print(f"File: {fileName}")
-        print(f"Hash: {fileHash}")
-        print(f"User: {userName}")
-        print(f"DK: {detectedKeyword}")
-        print("-" * 20)
+        ident = current_identity()
+        return {
+            "timestamp": iso_now(),
+            "action": action,
+            "file_name": file_path.name,
+            "file_path": str(file_path),
+            "file_hash": file_hash,
+            "detected_item": detected_item,
+            "user": ident["user"],
+            "domain": ident["domain"],
+            "host": ident["host"],
+            "pid": ident["pid"],
+        }
 
+    
     def on_created(self, event):
-        if not event.is_directory and self.isSensitive(event.src_path):
-            detectedItem = os.path.splitext(event.src_path)[1].lower() if self.detectionMode == "ext" else os.path.basename(event.src_path).lower()
-            self.logEvent("CREATED", event.src_path, detectedItem)
+        if event.is_directory:
+            return
+        path = Path(event.src_path)
+        if is_noisy(path) or self._debounced(path, "CREATED"):
+            return
+        if self.is_sensitive(path):
+            self.pipeline.handle_event(self.generate_event_data("CREATED", path))
 
     def on_modified(self, event):
-        if not event.is_directory and self.isSensitive(event.src_path):
-            detectedItem = os.path.splitext(event.src_path)[1].lower() if self.detectionMode == "ext" else os.path.basename(event.src_path).lower()
-            self.logEvent("MODIFIED", event.src_path, detectedItem)
+        if event.is_directory:
+            return
+        path = Path(event.src_path)
+        if is_noisy(path) or self._debounced(path, "MODIFIED"):
+            return
+        if self.is_sensitive(path):
+            self.pipeline.handle_event(self.generate_event_data("MODIFIED", path))
 
     def on_deleted(self, event):
-        if not event.is_directory and self.isSensitive(event.src_path):
-            detectedItem = os.path.splitext(event.src_path)[1].lower() if self.detectionMode == "ext" else os.path.basename(event.src_path).lower()
-            self.logEvent("DELETED", event.src_path, detectedItem)
+        if event.is_directory:
+            return
+        path = Path(event.src_path)
+        if is_noisy(path) or self._debounced(path, "DELETED"):
+            return
+        if self.is_sensitive(path):
+            self.pipeline.handle_event(self.generate_event_data("DELETED", path))
 
     def on_moved(self, event):
-        if not event.is_directory and self.isSensitive(event.dest_path):
-            detectedItem = os.path.splitext(event.dest_path)[1].lower() if self.detectionMode == "ext" else os.path.basename(event.dest_path).lower()
-            self.logEvent("MOVED/RENAMED", event.dest_path, detectedItem)
+        if event.is_directory:
+            return
+        src, dst = Path(event.src_path), Path(event.dest_path)
+        if (is_noisy(src) and is_noisy(dst)) or self._debounced(dst, "MOVED"):
+            return
+        if self.is_sensitive(src) or self.is_sensitive(dst):
+            self.pipeline.handle_event(self.generate_event_data("MOVED", dst))
 
-
+# ----------------------------- 엔트리포인트 -----------------------------
 if __name__ == "__main__":
-    # 감시 폴더 설정
-    watchDirectory = input("감시할 폴더 경로를 입력하세요 (예: C:\\sensitiveFile): ").strip()
-    if not watchDirectory:
-        watchDirectory = r"C:\sensitiveFile"
-    
-    # 사용자가 입력한 경로가 존재하지 않으면 프로그램 종료
-    if not os.path.isdir(watchDirectory):
-        print(f"[ERROR] '{watchDirectory}' 폴더가 존재하지 않습니다. 프로그램을 종료합니다.")
-        exit(1)
-        
-    modeInput = input("기밀문서 설정 방식을 선택하세요 (확장자 / 파일이름): ").strip()
-    if modeInput == "확장자":
-        rulesInput = input("민감한 확장자들을 입력하세요 (예: .docx,.pdf,.hwp): ").strip()
-        detectionRules = [e.strip().lower() if e.strip().startswith(".") else "." + e.strip().lower()
-                          for e in rulesInput.split(",") if e.strip()]
-        detectionMode = "ext"
-    elif modeInput == "파일이름":
-        rulesInput = input("민감한 파일 키워드를 입력하세요 (예: secret,plan,기밀): ").strip()
-        detectionRules = [k.strip().lower() for k in rulesInput.split(",") if k.strip()]
-        detectionMode = "kw"
+    # 감시 경로 입력
+    watch_directory = input("감시할 폴더 경로를 입력하세요 (예: C:\\sensitiveFile): ").strip() or r"C:\sensitiveFile"
+    if not os.path.isdir(watch_directory):
+        print(f"[ERROR] '{watch_directory}' 폴더가 존재하지 않습니다.")
+        raise SystemExit(1)
+
+    # 기밀문서 탐지 방식
+    mode_input = input("기밀문서 설정 방식을 선택하세요 (확장자 / 파일이름): ").strip()
+    if mode_input == "확장자":
+        rules_input = input("민감한 확장자들을 입력하세요 (예: .docx,.pdf,.hwp): ").strip()
+        detection_rules = {
+            e.strip().lower() if e.strip().startswith(".") else "." + e.strip().lower()
+            for e in rules_input.split(",") if e.strip()
+        }
+        detection_mode = "ext"
+    elif mode_input == "파일이름":
+        rules_input = input("민감한 파일 키워드를 입력하세요 (예: secret,plan,기밀): ").strip()
+        detection_rules = {k.strip().lower() for k in rules_input.split(",") if k.strip()}
+        detection_mode = "kw"
     else:
         print("[ERROR] 잘못된 입력입니다. '확장자' 또는 '파일이름' 중 하나를 입력하세요.")
-        exit(1)
+        raise SystemExit(1)
 
-    eventHandler = SensitiveAccessHandler(detectionMode, detectionRules)
+    # 저장소: 지금은 인메모리. 나중에 실제 DB 리포지토리로 교체.
+    repo = InMemoryEventRepository()
+
+    pipeline = SecurityPipeline(detection_mode, detection_rules, repo)
+    event_handler = SensitiveAccessHandler(
+        pipeline,
+        debounce_sec=1.5,   # 필요시 2~3초로 늘리면 중복 더 줄어듦
+    )
+
     observer = Observer()
-    observer.schedule(eventHandler, path=watchDirectory, recursive=False)
+    observer.schedule(event_handler, path=watch_directory, recursive=False)
 
-    print("\n[*] Monitoring folder:", watchDirectory)
-    print("[*] Mode:", "확장자 기반" if detectionMode == "ext" else "파일이름 기반")
-    print("[*] Rules:", detectionRules)
-    print("[*] Waiting for file activity...\n")
+    print("\n[*] Monitoring:", watch_directory)
+    print("[*] Mode:", detection_mode)
+    print("[*] Rules:", detection_rules)
+    print("[*] Filters: noisy(~$, *.tmp, *.crdownload), debounce=1.5s")
+    print("[*] Waiting for file activity... (Ctrl+C to exit)\n")
 
     observer.start()
     try:
